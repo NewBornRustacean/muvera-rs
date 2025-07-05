@@ -1,7 +1,17 @@
 [package]
 name = "muvera-rs"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
+authors = ["NewBornRustacean <huiseomkim@gmail.com>"]
+description = "An unofficial Rust implementation of MuVERA: Multi-Vector Retrieval via Fixed Dimensional Encodings"
+license = "MIT"
+repository = "https://github.com/NewBornRustacean/muvera-rs"
+homepage = "https://github.com/NewBornRustacean/muvera-rs"
+documentation = "https://docs.rs/muvera-rs"
+readme = "README.md"
+keywords = ["muvera", "multi-vector", "retrieval", "embedding", "similarity", "search", "fde", "information-retrieval", "Fixed-Dimensional-Encoding"]
+categories = ["algorithms", "data-structures", "science"]
+rust-version = "1.70"
 
 [dependencies]
 ndarray = { version = "0.16.1", features = ["rayon"] }
