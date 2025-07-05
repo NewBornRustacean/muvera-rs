@@ -9,7 +9,7 @@ repository = "https://github.com/NewBornRustacean/muvera-rs"
 homepage = "https://github.com/NewBornRustacean/muvera-rs"
 documentation = "https://docs.rs/muvera-rs"
 readme = "README.md"
-keywords = ["muvera", "multi-vector", "embedding",  "fde", "Fixed-Dimensional-Encoding"]
+keywords = ["muvera", "multi-vector", "embedding",  "fde", "retrieval"]
 categories = ["algorithms", "data-structures", "science"]
 rust-version = "1.70"
 
