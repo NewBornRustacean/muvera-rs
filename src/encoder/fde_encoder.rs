@@ -1,20 +1,23 @@
 use crate::types::{Aggregation, FDEFloat};
-use ndarray::{Array1, Array2, ArrayView2};
+use ndarray::{Array1, Array2, ArrayView2, s};
 use rand;
 use rand::SeedableRng;
 use rand_distr::{Distribution, StandardNormal};
 
 /// Trait for fixed-dimensional encoding from token embeddings.
 pub trait FDEEncoding<T: FDEFloat> {
-    fn encode(&self, tokens: ArrayView2<T>, mode: Aggregation) -> Vec<T>;
+    fn encode(&self, tokens: ArrayView2<T>, mode: Aggregation) -> Array1<T>;
 
-    fn encode_query(&self, tokens: ArrayView2<T>) -> Vec<T> {
+    // fn batch_encode(&self, tokens: ArrayView2<T>, mode: Aggregation) -> Vec<T>;
+
+    fn encode_query(&self, tokens: ArrayView2<T>) -> Array1<T> {
         self.encode(tokens, Aggregation::Sum)
     }
 
-    fn encode_doc(&self, tokens: ArrayView2<T>) -> Vec<T> {
+    fn encode_doc(&self, tokens: ArrayView2<T>) -> Array1<T> {
         self.encode(tokens, Aggregation::Avg)
     }
+
 }
 
 pub struct FDEEncoder<T: FDEFloat> {
@@ -47,7 +50,7 @@ impl<T: FDEFloat> FDEEncoder<T> {
 }
 
 impl<T: FDEFloat> FDEEncoding<T> for FDEEncoder<T> {
-    fn encode(&self, multi_vector_tokens: ArrayView2<T>, mode: Aggregation) -> Vec<T> {
+    fn encode(&self, multi_vector_tokens: ArrayView2<T>, mode: Aggregation) -> Array1<T> {
         let embedding_dim = multi_vector_tokens.ncols();
         let buckets = self.buckets;
 
@@ -84,22 +87,24 @@ impl<T: FDEFloat> FDEEncoding<T> for FDEEncoder<T> {
         }
 
         // 8) Final aggregation: sum or average per bucket
-        let mut result = Vec::with_capacity(buckets * embedding_dim);
-        for b in 0..buckets {
-            let vec = &bucket_sums[b];
-            let count = bucket_counts[b];
+        let mut result = Array1::<T>::zeros(buckets * embedding_dim);
+
+        for (i, (vec, &count)) in bucket_sums.iter().zip(bucket_counts.iter()).enumerate() {
+            let mut chunk = result.slice_mut(s![i * embedding_dim..(i + 1) * embedding_dim]);
 
             if count == T::zero() {
-                // No tokens hashed here, fill zero vector
-                result.extend((0..embedding_dim).map(|_| T::zero()));
+                chunk.fill(T::zero());
             } else if mode == Aggregation::Avg {
-                result.extend(vec.iter().map(|&v| v / count));
+                // divide each value by count
+                chunk.assign(&vec.mapv(|x| x / count));
             } else {
-                result.extend(vec.iter());
+                // just copy the vector directly
+                chunk.assign(vec);
             }
         }
 
         result
+
     }
 }
 
