@@ -57,7 +57,7 @@ use ndarray::{Array2, ArrayView2};
 
 fn main() {
     // Create encoder with 1024 buckets for 768-dimensional embeddings
-    let encoder = FDEEncoder::new(1024, 768, 42);
+    let encoder = FDEEncoder::new(128, 768, 42);
     
     // Example token embeddings (num_tokens, embedding_dim)
     let tokens = Array2::from_shape_vec((32, 768), vec![0.1; 32 * 768]).unwrap();
@@ -67,10 +67,6 @@ fn main() {
     
     // Encode document (average aggregation)
     let doc_fde = encoder.encode_doc(tokens.view());
-    
-    // Use for similarity search
-    let similarity = query_fde.dot(&doc_fde);
-    println!("Similarity: {}", similarity);
 }
 ```
 
@@ -81,7 +77,7 @@ use muvera_rs::encoder::fde_encoder::{FDEEncoder, FDEEncoding};
 use ndarray::{Array3, ArrayView3};
 
 fn encode_batch() {
-    let encoder = FDEEncoder::new(1024, 768, 42);
+    let encoder = FDEEncoder::new(128, 768, 42);
     
     // Batch of token embeddings (batch_size, num_tokens, embedding_dim)
     let batch_tokens = Array3::from_shape_vec((100, 32, 768), vec![0.1; 100 * 32 * 768]).unwrap();
@@ -100,7 +96,7 @@ use muvera_rs::encoder::fde_encoder::{FDEEncoder, FDEEncoding};
 use muvera_rs::types::Aggregation;
 
 fn custom_encoding() {
-    let encoder = FDEEncoder::new(1024, 768, 42);
+    let encoder = FDEEncoder::new(128, 768, 42);
     let tokens = Array2::from_shape_vec((32, 768), vec![0.1; 32 * 768]).unwrap();
     
     // Use custom aggregation mode
@@ -120,7 +116,7 @@ The main encoder struct that implements the Fixed Dimensional Encoding algorithm
 pub fn new(buckets: usize, dim: usize, seed: u64) -> Self
 ```
 
-- `buckets`: Number of hash buckets (hyperplanes) - typically 1024-20480
+- `buckets`: Number of hash buckets (hyperplanes) 
 - `dim`: Dimensionality of input token embeddings
 - `seed`: Random seed for reproducible hyperplane initialization
 
@@ -167,16 +163,13 @@ Enum defining aggregation modes:
 
 1. **Benchmark Suite**
    - Integration with BEIR datasets (MS MARCO, etc.)
-   - Performance comparison with PLAID and other baselines
-   - End-to-end retrieval latency measurements
    - Memory usage and compression analysis
 
 2. **Advanced Features**
+   - **Support BLAS**
    - **Product Quantization (PQ)**: 32x compression with minimal quality loss
-   - **Ball Carving**: Query clustering for faster re-ranking
    - **Final Projections**: Dimensionality reduction techniques
-   - **GPU Acceleration**: CUDA/OpenCL support for large-scale encoding
-
+   
 
 ## License
 
