@@ -1,6 +1,6 @@
 [package]
 name = "muvera-rs"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["NewBornRustacean <huiseomkim@gmail.com>"]
 description = "An unofficial Rust implementation of MuVERA: Multi-Vector Retrieval via Fixed Dimensional Encodings"

@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "muvera"
-version = "0.1.0"
+version = "0.2.0"
 requires-python = ">=3.8"
 description = "An unofficial Rust implementation of MuVERA: Multi-Vector Retrieval via Fixed Dimensional Encodings"
 readme = "README.md"
@@ -35,4 +35,17 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/NewBornRustacean/muvera-rs"
 Repository = "https://github.com/NewBornRustacean/muvera-rs"
-Documentation = "https://docs.rs/muvera-rs" 
+Documentation = "https://docs.rs/muvera-rs"
+Issues = "https://github.com/NewBornRustacean/muvera-rs/issues"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "black>=22.0.0",
+    "mypy>=1.0.0",
+]
+
+[tool.maturin]
+features = ["python-bindings"]
+python-source = "python"
+module-name = "muvera" 

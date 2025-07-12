@@ -19,13 +19,14 @@ use crate::types::Aggregation;
 fn encode_fde<'py>(
     py: Python<'py>,
     token_embeddings: PyReadonlyArray2<'py, f32>,
+    buckets: usize,
     agg: &str,
 ) -> PyResult<Bound<'py, PyArray1<f32>>> {
     let tokens: ArrayView2<f32> = token_embeddings.as_array();
     let embedding_dim = tokens.ncols();
     
     // Create encoder with matching dimension and reasonable defaults
-    let encoder = FDEEncoder::new(128, embedding_dim, 42);
+    let encoder = FDEEncoder::new(buckets, embedding_dim, 42);
     
     let mode = match agg {
         "mean" => Aggregation::Avg,

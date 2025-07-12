@@ -92,11 +92,12 @@ import muvera
 embeddings = np.random.randn(32, 768).astype(np.float32)
 
 # Encode with mean aggregation
-result = muvera.encode_fde(embeddings, "mean")
+buckets = 3
+result = muvera.encode_fde(embeddings, buckets, "mean")
 print(f"FDE result shape: {result.shape}")
 
 # Encode with max aggregation
-result_max = muvera.encode_fde(embeddings, "max")
+result_max = muvera.encode_fde(embeddings, buckets, "max")
 print(f"FDE max result shape: {result_max.shape}")
 ```
 
