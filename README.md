@@ -39,6 +39,8 @@ The key insight is that the dot product of FDEs approximates the true multi-vect
 
 ## Installation
 
+### Rust
+
 Add to your `Cargo.toml`:
 
 ```toml
@@ -46,9 +48,59 @@ Add to your `Cargo.toml`:
 muvera-rs = "0.1.0"
 ```
 
+### Python
+
+Install from PyPI:
+
+```bash
+pip install muvera
+```
+
+Or install from source:
+
+```bash
+pip install maturin
+git clone https://github.com/NewBornRustacean/muvera-rs.git
+cd muvera-rs
+maturin develop --features python-bindings
+```
+
+## Testing the Python Bindings
+
+After building with maturin, you can test the Python bindings interactively:
+
+```python
+import numpy as np
+import muvera
+
+embeddings = np.random.randn(32, 768).astype(np.float32)
+result = muvera.encode_fde(embeddings, "mean")
+print(result)
+```
+
+Or save the above as a script and run with `python my_test.py`.
+
 ## Usage
 
-### Basic Example
+### Python Example
+
+```python
+import numpy as np
+import muvera
+
+# Create token embeddings (num_tokens, embedding_dim)
+embeddings = np.random.randn(32, 768).astype(np.float32)
+
+# Encode with mean aggregation
+result = muvera.encode_fde(embeddings, "mean")
+print(f"FDE result shape: {result.shape}")
+
+# Encode with max aggregation
+result_max = muvera.encode_fde(embeddings, "max")
+print(f"FDE max result shape: {result_max.shape}")
+```
+
+### Rust Example
 
 ```rust
 use muvera_rs::encoder::fde_encoder::{FDEEncoder, FDEEncoding};
