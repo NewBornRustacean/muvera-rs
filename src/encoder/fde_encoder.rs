@@ -1,6 +1,6 @@
 use crate::types::{Aggregation, FDEFloat};
 use ndarray::parallel::prelude::*;
-use ndarray::{Array1, Array2, Array3, ArrayView2, ArrayView3, Axis, s};
+use ndarray::{s, Array1, Array2, Array3, ArrayView2, ArrayView3, Axis};
 use rand;
 use rand::SeedableRng;
 use rand_distr::{Distribution, StandardNormal};
@@ -106,22 +106,23 @@ impl<T: FDEFloat> FDEEncoder<T> {
     pub fn new(buckets: usize, dim: usize, seed: u64) -> Self {
         let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
 
-        // Create a vector of size buckets * dim filled with standard normal distributed floats
-        let data: Vec<T> = (0..buckets * dim)
-            .map(|_| {
-                let sample: f64 = StandardNormal.sample(&mut rng);
-                T::from(sample).unwrap() // safe unwrap since f32/f64 supported
-            })
-            .collect();
-
-        let hyperplanes = Array2::from_shape_vec((buckets, dim), data)
-            .expect("Failed to create hyperplanes array");
+        // Create hyperplanes directly with the right shape
+        let hyperplanes = Array2::from_shape_fn((dim, buckets), |_| {
+            let sample: f64 = StandardNormal.sample(&mut rng);
+            T::from(sample).unwrap() // safe unwrap since f32/f64 supported
+        });
 
         Self {
             buckets,
             dim,
             hyperplanes,
         }
+    }
+}
+
+impl Default for FDEEncoder<f32> {
+    fn default() -> Self {
+        Self::new(128, 768, 42)
     }
 }
 
@@ -144,37 +145,30 @@ impl<T: FDEFloat + Send + Sync> FDEEncoding<T> for FDEEncoder<T> {
 
         assert_eq!(embedding_dim, self.dim);
 
-        // 1) Project tokens onto hyperplanes (vectorized)
+        // Project tokens onto hyperplanes (vectorized)
         // projections shape: (num_tokens, buckets)
-        let projections: Array2<T> = multi_vector_tokens.dot(&self.hyperplanes.t());
+        let projections: Array2<T> = multi_vector_tokens.dot(&self.hyperplanes);
 
-        // 2) Convert projections > 0 to binary mask (u8)
-        let bin_mask = projections.mapv(|x| if x > T::zero() { 1u8 } else { 0u8 });
+        // Convert projections > 0 to binary mask (usize)
+        let bin_mask_usize = projections.mapv(|x| if x > T::zero() { 1usize } else { 0usize });
 
-        // 3) Cast mask to usize for bitwise summation
-        let bin_mask_usize = bin_mask.mapv(|x| x as usize);
-
-        // 4) Create powers of two vector (bit weights)
-        let powers = Array1::from_iter((0..buckets).map(|i| 1 << i));
-
-        // 5) Compute hashes as dot product between mask and powers (vectorized)
-        let hashes: Array1<usize> = bin_mask_usize.dot(&powers);
-
-        // 6) Modulo to get bucket indices
+        // Weighted sum of binary mask to get bucket indices
+        let weights = Array1::from_iter((1..=buckets).map(|i| i));
+        let hashes: Array1<usize> = bin_mask_usize.dot(&weights);
         let bucket_indices: Vec<usize> = hashes.iter().map(|h| h % buckets).collect();
 
         // Prepare accumulation buffers per bucket
         let mut bucket_sums = vec![ndarray::Array1::<T>::zeros(embedding_dim); buckets];
         let mut bucket_counts = vec![T::zero(); buckets];
 
-        // 7) Accumulate token embeddings into buckets
+        // Accumulate token embeddings into buckets
         for (i, &bucket_index) in bucket_indices.iter().enumerate() {
             let token = multi_vector_tokens.row(i);
             bucket_sums[bucket_index] = &bucket_sums[bucket_index] + &token;
             bucket_counts[bucket_index] = bucket_counts[bucket_index] + T::one();
         }
 
-        // 8) Final aggregation: sum or average per bucket
+        // Final aggregation: sum or average per bucket
         let mut result = Array1::<T>::zeros(buckets * embedding_dim);
 
         for (i, (vec, &count)) in bucket_sums.iter().zip(bucket_counts.iter()).enumerate() {
@@ -251,7 +245,7 @@ mod tests {
     #[test]
     fn test_new_hyperplanes_shape() {
         let enc = create_encoder();
-        assert_eq!(enc.hyperplanes.shape(), &[BUCKETS, DIM]);
+        assert_eq!(enc.hyperplanes.shape(), &[DIM, BUCKETS]);
     }
 
     #[test]
@@ -321,11 +315,11 @@ mod tests {
             [0.5, 0.6, 0.7, 0.8],
             [0.9, 1.0, 1.1, 1.2]
         ];
-        let projections = tokens.dot(&enc.hyperplanes.t());
+        let projections = tokens.dot(&enc.hyperplanes);
         let bin_mask = projections.mapv(|x| if x > 0.0 { 1u8 } else { 0u8 });
         let bin_mask_usize = bin_mask.mapv(|x| x as usize);
-        let powers = ndarray::Array1::from_iter((0..BUCKETS).map(|i| 1 << i));
-        let hashes: ndarray::Array1<usize> = bin_mask_usize.dot(&powers);
+        let weights = Array1::from_iter((1..=BUCKETS).map(|i| i));
+        let hashes: Array1<usize> = bin_mask_usize.dot(&weights);
         for h in hashes.iter() {
             let idx = h % BUCKETS;
             assert!(idx < BUCKETS);
@@ -554,5 +548,75 @@ mod tests {
         let result = enc.batch_encode(batch_tokens.view(), Aggregation::Sum);
         assert_eq!(result.shape(), &[2, BUCKETS * DIM]);
         assert!(result.iter().all(|&v| v.is_finite()));
+    }
+
+    #[test]
+    fn test_encode_large_dim_bucket() {
+        // Test with realistic large dimensions and buckets
+        const LARGE_DIM: usize = 128;
+        const LARGE_BUCKETS: usize = 128;
+        const LARGE_SEED: u64 = 42;
+
+        let encoder = FDEEncoder::new(LARGE_BUCKETS, LARGE_DIM, LARGE_SEED);
+        
+        // Create test data with large dimensions
+        let tokens = Array2::from_shape_vec(
+            (10, LARGE_DIM), 
+            (0..10 * LARGE_DIM).map(|i| (i as f32) * 0.1).collect()
+        ).unwrap();
+
+        // Test both aggregation modes
+        let sum_result = encoder.encode(tokens.view(), Aggregation::Sum);
+        let avg_result = encoder.encode(tokens.view(), Aggregation::Avg);
+
+        // Verify output shapes
+        assert_eq!(sum_result.len(), LARGE_BUCKETS * LARGE_DIM);
+        assert_eq!(avg_result.len(), LARGE_BUCKETS * LARGE_DIM);
+
+        // Verify results are finite
+        assert!(sum_result.iter().all(|&v| v.is_finite()));
+        assert!(avg_result.iter().all(|&v| v.is_finite()));
+
+        // Verify results are different (should be different due to different aggregation)
+        assert!(sum_result != avg_result);
+
+        // Verify not all results are zero
+        assert!(sum_result.iter().any(|&v| v != 0.0));
+        assert!(avg_result.iter().any(|&v| v != 0.0));
+    }
+
+    #[test]
+    fn test_batch_encode_large_dim_bucket() {
+        // Test batch encoding with large dimensions and buckets
+        const LARGE_DIM: usize = 128;
+        const LARGE_BUCKETS: usize = 128;
+        const LARGE_SEED: u64 = 42;
+
+        let encoder = FDEEncoder::new(LARGE_BUCKETS, LARGE_DIM, LARGE_SEED);
+        
+        // Create batch test data
+        let batch_tokens = Array3::from_shape_vec(
+            (5, 10, LARGE_DIM), 
+            (0..5 * 10 * LARGE_DIM).map(|i| (i as f32) * 0.1).collect()
+        ).unwrap();
+
+        // Test both aggregation modes
+        let sum_result = encoder.batch_encode(batch_tokens.view(), Aggregation::Sum);
+        let avg_result = encoder.batch_encode(batch_tokens.view(), Aggregation::Avg);
+
+        // Verify output shapes
+        assert_eq!(sum_result.shape(), &[5, LARGE_BUCKETS * LARGE_DIM]);
+        assert_eq!(avg_result.shape(), &[5, LARGE_BUCKETS * LARGE_DIM]);
+
+        // Verify results are finite
+        assert!(sum_result.iter().all(|&v| v.is_finite()));
+        assert!(avg_result.iter().all(|&v| v.is_finite()));
+
+        // Verify results are different
+        assert!(sum_result != avg_result);
+
+        // Verify not all results are zero
+        assert!(sum_result.iter().any(|&v| v != 0.0));
+        assert!(avg_result.iter().any(|&v| v != 0.0));
     }
 }
