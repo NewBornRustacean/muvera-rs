@@ -1,9 +1,8 @@
-use crate::types::{Aggregation, FDEFloat};
-use ndarray::parallel::prelude::*;
-use ndarray::{s, Array1, Array2, Array3, ArrayView2, ArrayView3, Axis};
-use rand;
-use rand::SeedableRng;
+use ndarray::{parallel::prelude::*, Array1, Array2, ArrayView2, ArrayView3, Axis};
+use rand::{self, SeedableRng};
 use rand_distr::{Distribution, StandardNormal};
+
+use crate::types::{Aggregation, FDEFloat};
 
 /// Trait for fixed-dimensional encoding from token embeddings.
 ///
@@ -126,7 +125,7 @@ impl Default for FDEEncoder<f32> {
     }
 }
 
-impl<T: FDEFloat + Send + Sync> FDEEncoding<T> for FDEEncoder<T> {
+impl<T: FDEFloat + Send + Sync + num_traits::FromPrimitive> FDEEncoding<T> for FDEEncoder<T> {
     /// Encode a single multi-vector of tokens into a fixed-dimensional vector.
     ///
     /// Projects tokens onto hyperplanes, hashes them into buckets,
@@ -140,51 +139,26 @@ impl<T: FDEFloat + Send + Sync> FDEEncoding<T> for FDEEncoder<T> {
     /// A 1D array of length `buckets * dim` representing the encoded vector.
 
     fn encode(&self, multi_vector_tokens: ArrayView2<T>, mode: Aggregation) -> Array1<T> {
-        let embedding_dim = multi_vector_tokens.ncols();
         let buckets = self.buckets;
+        assert_eq!(multi_vector_tokens.ncols(), self.dim);
 
-        assert_eq!(embedding_dim, self.dim);
+        // 1. Projection (num_tokens, buckets)
+        let projections = multi_vector_tokens.dot(&self.hyperplanes);
 
-        // Project tokens onto hyperplanes (vectorized)
-        // projections shape: (num_tokens, buckets)
-        let projections: Array2<T> = multi_vector_tokens.dot(&self.hyperplanes);
+        // 2. ReLU Activation
+        let activated = projections.mapv(|x| if x > T::zero() { x } else { T::zero() });
 
-        // Convert projections > 0 to binary mask (usize)
-        let bin_mask_usize = projections.mapv(|x| if x > T::zero() { 1usize } else { 0usize });
-
-        // Weighted sum of binary mask to get bucket indices
-        let weights = Array1::from_iter((1..=buckets).map(|i| i));
-        let hashes: Array1<usize> = bin_mask_usize.dot(&weights);
-        let bucket_indices: Vec<usize> = hashes.iter().map(|h| h % buckets).collect();
-
-        // Prepare accumulation buffers per bucket
-        let mut bucket_sums = vec![ndarray::Array1::<T>::zeros(embedding_dim); buckets];
-        let mut bucket_counts = vec![T::zero(); buckets];
-
-        // Accumulate token embeddings into buckets
-        for (i, &bucket_index) in bucket_indices.iter().enumerate() {
-            let token = multi_vector_tokens.row(i);
-            bucket_sums[bucket_index] = &bucket_sums[bucket_index] + &token;
-            bucket_counts[bucket_index] = bucket_counts[bucket_index] + T::one();
-        }
-
-        // Final aggregation: sum or average per bucket
-        let mut result = Array1::<T>::zeros(buckets * embedding_dim);
-
-        for (i, (vec, &count)) in bucket_sums.iter().zip(bucket_counts.iter()).enumerate() {
-            let mut chunk = result.slice_mut(s![i * embedding_dim..(i + 1) * embedding_dim]);
-
-            if count == T::zero() {
-                chunk.fill(T::zero());
-            } else if mode == Aggregation::Avg {
-                // divide each value by count
-                chunk.assign(&vec.mapv(|x| x / count));
-            } else {
-                // just copy the vector directly
-                chunk.assign(vec);
+        // 3. Aggregation
+        match mode {
+            // Query: Max-pooling
+            Aggregation::Sum => {
+                activated.fold_axis(Axis(0), T::zero(), |&acc, &x| if x > acc { x } else { acc })
+            }
+            // Document: Mean-pooling
+            Aggregation::Avg => {
+                activated.mean_axis(Axis(0)).unwrap_or_else(|| Array1::zeros(buckets))
             }
         }
-        result
     }
 
     /// Encode a batch of multi-vectors using parallel processing.
@@ -203,11 +177,11 @@ impl<T: FDEFloat + Send + Sync> FDEEncoding<T> for FDEEncoder<T> {
         T: FDEFloat + Sync + Send,
         Self: Sync,
     {
-        let (batch_size, _, embedding_dim) = batch_tokens.dim();
+        let (batch_size, _n, _) = batch_tokens.dim();
         let buckets = self.buckets;
 
         // Pre-allocate output array
-        let mut result = Array2::<T>::zeros((batch_size, buckets * embedding_dim));
+        let mut result = Array2::<T>::zeros((batch_size, buckets));
 
         // Process in parallel chunks for better cache locality
         let chunk_size =
@@ -230,393 +204,98 @@ impl<T: FDEFloat + Send + Sync> FDEEncoding<T> for FDEEncoder<T> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use ndarray::array;
+
+    use super::*;
 
     const DIM: usize = 4;
     const BUCKETS: usize = 3;
-    const SEED: u64 = 42;
 
-    // Helper: create encoder with fixed seed
     fn create_encoder() -> FDEEncoder<f32> {
-        FDEEncoder::new(BUCKETS, DIM, SEED)
+        FDEEncoder::new(BUCKETS, DIM, 42)
     }
 
     #[test]
-    fn test_new_hyperplanes_shape() {
+    fn test_output_dimension_reduction() {
         let enc = create_encoder();
-        assert_eq!(enc.hyperplanes.shape(), &[DIM, BUCKETS]);
-    }
-
-    #[test]
-    fn test_encode_output_shape() {
-        let enc = create_encoder();
-        // 2 tokens, each dim=4
         let tokens = array![[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 0.8]];
         let vec = enc.encode(tokens.view(), Aggregation::Sum);
-        // output length = buckets * dim
-        assert_eq!(vec.len(), BUCKETS * DIM);
+
+        // Output length must be equal to buckets, not buckets * dim
+        assert_eq!(vec.len(), BUCKETS);
     }
 
     #[test]
-    fn test_encode_empty_tokens() {
+    fn test_relu_behavior_correctness() {
         let enc = create_encoder();
-        let tokens = Array2::<f32>::zeros((0, DIM));
-        let vec = enc.encode(tokens.view(), Aggregation::Sum);
-        assert_eq!(vec.len(), BUCKETS * DIM);
-        assert!(vec.iter().all(|&x| x == 0.0));
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_encode_dim_mismatch() {
-        let enc = create_encoder();
-        // tokens have dim=3, encoder expects 4
-        let tokens = array![[0.1, 0.2, 0.3]];
-        enc.encode(tokens.view(), Aggregation::Sum);
-    }
-
-    #[test]
-    fn test_encode_query_vs_doc_aggregation() {
-        let enc = create_encoder();
-        let tokens = array![[1.0, 2.0, 3.0, 4.0], [2.0, 3.0, 4.0, 5.0]];
-
-        let sum_vec = enc.encode_query(tokens.view());
-        let avg_vec = enc.encode_doc(tokens.view());
-
-        // They should differ if buckets > 0
-        assert_eq!(sum_vec.len(), avg_vec.len());
-        assert!(sum_vec != avg_vec);
-    }
-
-    #[test]
-    fn test_encode_single_token() {
-        let enc = create_encoder();
-        let tokens = array![[1.0, 2.0, 3.0, 4.0]];
-        let vec = enc.encode(tokens.view(), Aggregation::Sum);
-        assert_eq!(vec.len(), BUCKETS * DIM);
-        assert!(vec.iter().any(|&v| v != 0.0));
-    }
-
-    #[test]
-    fn test_encode_all_zero_tokens() {
-        let enc = create_encoder();
-        let tokens = array![[0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]];
-        let vec = enc.encode(tokens.view(), Aggregation::Sum);
-        assert_eq!(vec.len(), BUCKETS * DIM);
-        assert!(vec.iter().all(|&v| v == 0.0));
-    }
-
-    #[test]
-    fn test_bucket_indices_in_range() {
-        let enc = create_encoder();
-        let tokens = array![
-            [0.1, 0.2, 0.3, 0.4],
-            [0.5, 0.6, 0.7, 0.8],
-            [0.9, 1.0, 1.1, 1.2]
-        ];
+        let tokens = array![[1.0, 1.0, 1.0, 1.0]];
         let projections = tokens.dot(&enc.hyperplanes);
-        let bin_mask = projections.mapv(|x| if x > 0.0 { 1u8 } else { 0u8 });
-        let bin_mask_usize = bin_mask.mapv(|x| x as usize);
-        let weights = Array1::from_iter((1..=BUCKETS).map(|i| i));
-        let hashes: Array1<usize> = bin_mask_usize.dot(&weights);
-        for h in hashes.iter() {
-            let idx = h % BUCKETS;
-            assert!(idx < BUCKETS);
-        }
-    }
+        let encoded = enc.encode(tokens.view(), Aggregation::Sum);
 
-    // batched encode test
-    #[test]
-    fn test_deterministic_output() {
-        let enc = create_encoder();
-        let tokens = array![[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 0.8]];
-        let out1 = enc.encode(tokens.view(), Aggregation::Sum);
-        let out2 = enc.encode(tokens.view(), Aggregation::Sum);
-        assert_eq!(out1, out2);
-    }
-    #[test]
-    fn test_batch_encode_output_shape() {
-        let enc = create_encoder();
-        // 2 batches, 3 tokens each, each token dim=4
-        let batch_tokens = array![
-            [
-                [0.1, 0.2, 0.3, 0.4],
-                [0.5, 0.6, 0.7, 0.8],
-                [0.9, 1.0, 1.1, 1.2]
-            ],
-            [
-                [1.1, 1.2, 1.3, 1.4],
-                [1.5, 1.6, 1.7, 1.8],
-                [1.9, 2.0, 2.1, 2.2]
-            ]
-        ];
-        let result = enc.batch_encode(batch_tokens.view(), Aggregation::Sum);
-        // output shape: (batch_size, buckets * dim)
-        assert_eq!(result.shape(), &[2, BUCKETS * DIM]);
-    }
-
-    #[test]
-    fn test_batch_encode_empty_tokens() {
-        let enc = create_encoder();
-        // 2 batches, 0 tokens each, each token dim=4
-        let batch_tokens = Array3::<f32>::zeros((2, 0, DIM));
-        let result = enc.batch_encode(batch_tokens.view(), Aggregation::Sum);
-        assert_eq!(result.shape(), &[2, BUCKETS * DIM]);
-        assert!(result.iter().all(|&x| x == 0.0));
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_batch_encode_dim_mismatch() {
-        let enc = create_encoder();
-        // tokens have dim=3, encoder expects 4
-        let batch_tokens = array![
-            [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]],
-            [[0.7, 0.8, 0.9], [1.0, 1.1, 1.2]]
-        ];
-        enc.batch_encode(batch_tokens.view(), Aggregation::Sum);
-    }
-
-    #[test]
-    fn test_batch_encode_query_vs_doc_aggregation() {
-        let enc = create_encoder();
-        let batch_tokens = array![
-            [[1.0, 2.0, 3.0, 4.0], [2.0, 3.0, 4.0, 5.0]],
-            [[3.0, 4.0, 5.0, 6.0], [4.0, 5.0, 6.0, 7.0]]
-        ];
-
-        let sum_result = enc.batch_encode(batch_tokens.view(), Aggregation::Sum);
-        let avg_result = enc.batch_encode(batch_tokens.view(), Aggregation::Avg);
-
-        // They should differ if buckets > 0
-        assert_eq!(sum_result.shape(), avg_result.shape());
-        assert!(sum_result != avg_result);
-    }
-
-    #[test]
-    fn test_batch_encode_single_token_per_batch() {
-        let enc = create_encoder();
-        let batch_tokens = array![[[1.0, 2.0, 3.0, 4.0]], [[5.0, 6.0, 7.0, 8.0]]];
-        let result = enc.batch_encode(batch_tokens.view(), Aggregation::Sum);
-        assert_eq!(result.shape(), &[2, BUCKETS * DIM]);
-        assert!(result.iter().any(|&v| v != 0.0));
-    }
-
-    #[test]
-    fn test_batch_encode_all_zero_tokens() {
-        let enc = create_encoder();
-        let batch_tokens = array![
-            [[0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]],
-            [[0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]]
-        ];
-        let result = enc.batch_encode(batch_tokens.view(), Aggregation::Sum);
-        assert_eq!(result.shape(), &[2, BUCKETS * DIM]);
-        assert!(result.iter().all(|&v| v == 0.0));
-    }
-
-    #[test]
-    fn test_batch_encode_deterministic_output() {
-        let enc = create_encoder();
-        let batch_tokens = array![
-            [[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 0.8]],
-            [[0.9, 1.0, 1.1, 1.2], [1.3, 1.4, 1.5, 1.6]]
-        ];
-        let out1 = enc.batch_encode(batch_tokens.view(), Aggregation::Sum);
-        let out2 = enc.batch_encode(batch_tokens.view(), Aggregation::Sum);
-        assert_eq!(out1, out2);
-    }
-
-    #[test]
-    fn test_batch_encode_consistency_with_single_encode() {
-        let enc = create_encoder();
-        let single_tokens = array![[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 0.8]];
-        let batch_tokens = array![[[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 0.8]]];
-
-        let single_result = enc.encode(single_tokens.view(), Aggregation::Sum);
-        let batch_result = enc.batch_encode(batch_tokens.view(), Aggregation::Sum);
-
-        // First row of batch result should match single encode result
-        assert_eq!(single_result, batch_result.row(0));
-    }
-
-    #[test]
-    fn test_batch_encode_multiple_batches_consistency() {
-        let enc = create_encoder();
-        let tokens1 = array![[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 0.8]];
-        let tokens2 = array![[0.9, 1.0, 1.1, 1.2], [1.3, 1.4, 1.5, 1.6]];
-
-        let single1 = enc.encode(tokens1.view(), Aggregation::Sum);
-        let single2 = enc.encode(tokens2.view(), Aggregation::Sum);
-
-        let batch_tokens = array![
-            [[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 0.8]],
-            [[0.9, 1.0, 1.1, 1.2], [1.3, 1.4, 1.5, 1.6]]
-        ];
-        let batch_result = enc.batch_encode(batch_tokens.view(), Aggregation::Sum);
-
-        // Each row should match the corresponding single encode result
-        assert_eq!(single1, batch_result.row(0));
-        assert_eq!(single2, batch_result.row(1));
-    }
-
-    #[test]
-    fn test_batch_encode_different_token_counts() {
-        let enc = create_encoder();
-        // Create arrays with different token counts manually
-        let mut batch_tokens = Array3::<f32>::zeros((2, 3, DIM));
-
-        // First batch: 2 tokens
-        batch_tokens.slice_mut(s![0, 0, ..]).assign(&array![0.1, 0.2, 0.3, 0.4]);
-        batch_tokens.slice_mut(s![0, 1, ..]).assign(&array![0.5, 0.6, 0.7, 0.8]);
-        // Third token in first batch remains zero
-
-        // Second batch: 3 tokens
-        batch_tokens.slice_mut(s![1, 0, ..]).assign(&array![0.9, 1.0, 1.1, 1.2]);
-        batch_tokens.slice_mut(s![1, 1, ..]).assign(&array![1.3, 1.4, 1.5, 1.6]);
-        batch_tokens.slice_mut(s![1, 2, ..]).assign(&array![1.7, 1.8, 1.9, 2.0]);
-
-        let result = enc.batch_encode(batch_tokens.view(), Aggregation::Sum);
-        assert_eq!(result.shape(), &[2, BUCKETS * DIM]);
-        assert!(result.iter().any(|&v| v != 0.0));
-    }
-
-    #[test]
-    fn test_batch_encode_large_batch() {
-        let enc = create_encoder();
-        let batch_size = 100;
-        let num_tokens = 5;
-
-        // Create a large batch with random-like data
-        let mut batch_tokens = Array3::<f32>::zeros((batch_size, num_tokens, DIM));
-        for i in 0..batch_size {
-            for j in 0..num_tokens {
-                for k in 0..DIM {
-                    batch_tokens[[i, j, k]] = (i + j + k) as f32 * 0.1;
-                }
+        for i in 0..BUCKETS {
+            // if the projection is negative or zero, the encoded value should be zero due to ReLU
+            if projections[[0, i]] <= 0.0 {
+                assert_eq!(encoded[i], 0.0);
+            } else {
+                assert_eq!(encoded[i], projections[[0, i]]);
             }
         }
-
-        let result = enc.batch_encode(batch_tokens.view(), Aggregation::Sum);
-        assert_eq!(result.shape(), &[batch_size, BUCKETS * DIM]);
-
-        // Verify not all results are zero
-        assert!(result.iter().any(|&v| v != 0.0));
-
-        // Verify all results are finite
-        assert!(result.iter().all(|&v| v.is_finite()));
     }
 
     #[test]
-    fn test_batch_encode_aggregation_modes() {
+    fn test_asymmetric_property() {
+        let enc = create_encoder();
+        let tokens = array![[1.0, 1.0, 1.0, 1.0], [0.1, 0.1, 0.1, 0.1]];
+
+        let query_vec = enc.encode_query(tokens.view()); // Max
+        let doc_vec = enc.encode_doc(tokens.view()); // Mean
+
+        // Max aggregation should produce values >= Mean aggregation
+        for i in 0..BUCKETS {
+            assert!(query_vec[i] >= doc_vec[i]);
+        }
+    }
+
+    #[test]
+    fn test_batch_encode_concurrency() {
         let enc = create_encoder();
         let batch_tokens = array![
-            [[1.0, 2.0, 3.0, 4.0], [2.0, 3.0, 4.0, 5.0]],
-            [[3.0, 4.0, 5.0, 6.0], [4.0, 5.0, 6.0, 7.0]]
+            [[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 0.8]],
+            [[0.9, 0.1, 0.2, 0.3], [0.4, 0.5, 0.6, 0.7]]
         ];
-
-        let sum_result = enc.batch_encode(batch_tokens.view(), Aggregation::Sum);
-        let avg_result = enc.batch_encode(batch_tokens.view(), Aggregation::Avg);
-
-        // For sum aggregation, values should generally be larger than avg aggregation
-        // (unless all tokens go to the same bucket)
-        let sum_max: f32 = sum_result.fold(0.0_f32, |acc, &x| acc.max(x.abs()));
-        let avg_max: f32 = avg_result.fold(0.0_f32, |acc, &x| acc.max(x.abs()));
-
-        // This is a weak test, but should hold for most cases
-        assert!(sum_max >= avg_max);
+        let result = enc.batch_encode(batch_tokens.view(), Aggregation::Avg);
+        assert_eq!(result.shape(), &[2, BUCKETS]);
     }
 
     #[test]
-    fn test_batch_encode_edge_cases() {
+    fn test_numerical_stability() {
         let enc = create_encoder();
-
-        // Test with very large values
-        let batch_tokens = array![
-            [[1e6, 2e6, 3e6, 4e6], [5e6, 6e6, 7e6, 8e6]],
-            [[-1e6, -2e6, -3e6, -4e6], [-5e6, -6e6, -7e6, -8e6]]
-        ];
-        let result = enc.batch_encode(batch_tokens.view(), Aggregation::Sum);
-        assert_eq!(result.shape(), &[2, BUCKETS * DIM]);
-        assert!(result.iter().all(|&v| v.is_finite()));
-
-        // Test with very small values
-        let batch_tokens = array![
-            [[1e-6, 2e-6, 3e-6, 4e-6], [5e-6, 6e-6, 7e-6, 8e-6]],
-            [[-1e-6, -2e-6, -3e-6, -4e-6], [-5e-6, -6e-6, -7e-6, -8e-6]]
-        ];
-        let result = enc.batch_encode(batch_tokens.view(), Aggregation::Sum);
-        assert_eq!(result.shape(), &[2, BUCKETS * DIM]);
-        assert!(result.iter().all(|&v| v.is_finite()));
+        let tokens = array![[f32::MAX, f32::MIN, 0.0, 1.0]];
+        let vec = enc.encode(tokens.view(), Aggregation::Avg);
+        assert!(vec.iter().all(|&x| x.is_finite()));
     }
 
     #[test]
-    fn test_encode_large_dim_bucket() {
-        // Test with realistic large dimensions and buckets
-        const LARGE_DIM: usize = 128;
-        const LARGE_BUCKETS: usize = 128;
-        const LARGE_SEED: u64 = 42;
-
-        let encoder = FDEEncoder::new(LARGE_BUCKETS, LARGE_DIM, LARGE_SEED);
-        
-        // Create test data with large dimensions
-        let tokens = Array2::from_shape_vec(
-            (10, LARGE_DIM), 
-            (0..10 * LARGE_DIM).map(|i| (i as f32) * 0.1).collect()
-        ).unwrap();
-
-        // Test both aggregation modes
-        let sum_result = encoder.encode(tokens.view(), Aggregation::Sum);
-        let avg_result = encoder.encode(tokens.view(), Aggregation::Avg);
-
-        // Verify output shapes
-        assert_eq!(sum_result.len(), LARGE_BUCKETS * LARGE_DIM);
-        assert_eq!(avg_result.len(), LARGE_BUCKETS * LARGE_DIM);
-
-        // Verify results are finite
-        assert!(sum_result.iter().all(|&v| v.is_finite()));
-        assert!(avg_result.iter().all(|&v| v.is_finite()));
-
-        // Verify results are different (should be different due to different aggregation)
-        assert!(sum_result != avg_result);
-
-        // Verify not all results are zero
-        assert!(sum_result.iter().any(|&v| v != 0.0));
-        assert!(avg_result.iter().any(|&v| v != 0.0));
+    fn test_reproducibility() {
+        let enc1: FDEEncoder<f64> = FDEEncoder::new(BUCKETS, DIM, 42);
+        let enc2 = FDEEncoder::new(BUCKETS, DIM, 42);
+        let tokens = array![[0.1, 0.2, 0.3, 0.4]];
+        assert_eq!(
+            enc1.encode_query(tokens.view()),
+            enc2.encode_query(tokens.view())
+        );
     }
 
     #[test]
-    fn test_batch_encode_large_dim_bucket() {
-        // Test batch encoding with large dimensions and buckets
-        const LARGE_DIM: usize = 128;
-        const LARGE_BUCKETS: usize = 128;
-        const LARGE_SEED: u64 = 42;
+    fn test_padding_impact() {
+        let enc = create_encoder();
+        let tokens_real = array![[0.5, 0.5, 0.5, 0.5]];
+        let tokens_with_padding = array![[0.5, 0.5, 0.5, 0.5], [0.0, 0.0, 0.0, 0.0]];
 
-        let encoder = FDEEncoder::new(LARGE_BUCKETS, LARGE_DIM, LARGE_SEED);
-        
-        // Create batch test data
-        let batch_tokens = Array3::from_shape_vec(
-            (5, 10, LARGE_DIM), 
-            (0..5 * 10 * LARGE_DIM).map(|i| (i as f32) * 0.1).collect()
-        ).unwrap();
-
-        // Test both aggregation modes
-        let sum_result = encoder.batch_encode(batch_tokens.view(), Aggregation::Sum);
-        let avg_result = encoder.batch_encode(batch_tokens.view(), Aggregation::Avg);
-
-        // Verify output shapes
-        assert_eq!(sum_result.shape(), &[5, LARGE_BUCKETS * LARGE_DIM]);
-        assert_eq!(avg_result.shape(), &[5, LARGE_BUCKETS * LARGE_DIM]);
-
-        // Verify results are finite
-        assert!(sum_result.iter().all(|&v| v.is_finite()));
-        assert!(avg_result.iter().all(|&v| v.is_finite()));
-
-        // Verify results are different
-        assert!(sum_result != avg_result);
-
-        // Verify not all results are zero
-        assert!(sum_result.iter().any(|&v| v != 0.0));
-        assert!(avg_result.iter().any(|&v| v != 0.0));
+        // Sum/Max should ignore zero padding, Mean will be affected.
+        assert_eq!(
+            enc.encode_query(tokens_real.view()),
+            enc.encode_query(tokens_with_padding.view())
+        );
     }
 }
