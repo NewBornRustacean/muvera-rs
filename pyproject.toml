@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "muvera"
-version = "0.2.0"
+version = "0.3.0"
 requires-python = ">=3.8"
 description = "An unofficial Rust implementation of MuVERA: Multi-Vector Retrieval via Fixed Dimensional Encodings"
 readme = "README.md"
@@ -47,5 +47,4 @@ dev = [
 
 [tool.maturin]
 features = ["python-bindings"]
-python-source = "python"
 module-name = "muvera" 
