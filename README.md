@@ -110,16 +110,16 @@ use ndarray::{Array2, ArrayView2};
 
 fn main() {
     // Create encoder with 1024 buckets for 768-dimensional embeddings
-    let encoder = FDEEncoder::new(128, 768, 42);
+    // Resulting vector will be ONLY 1024-dimensional, NOT 1024 * 768.
+    let encoder = FDEEncoder::new(1024, 768, 42);
     
-    // Example token embeddings (num_tokens, embedding_dim)
     let tokens = Array2::from_shape_vec((32, 768), vec![0.1; 32 * 768]).unwrap();
     
-    // Encode query (sum aggregation)
-    let query_fde = encoder.encode_query(tokens.view());
+    // Encode query (Max-pooling aggregation as per paper)
+    let query_fde = encoder.encode_query(tokens.view()); // Output: Array1<f32> of length 1024
     
-    // Encode document (average aggregation)
-    let doc_fde = encoder.encode_doc(tokens.view());
+    // Encode document (Mean-pooling aggregation)
+    let doc_fde = encoder.encode_doc(tokens.view()); // Output: Array1<f32> of length 1024
 }
 ```
 
