@@ -85,22 +85,21 @@ Or save the above as a script and run with `python my_test.py`.
 ### Python Example
 
 ```python
-import numpy as np
 import muvera
+import numpy as np
 
-# Create token embeddings (num_tokens, embedding_dim)
-embeddings = np.random.randn(32, 768).astype(np.float32)
+# Initialize encoder once (Storage/Index time)
+# 128 buckets, 768 dim
+encoder = muvera.PyFDEEncoder(128, 768, seed=42)
 
-# Encode with mean aggregation
-buckets = 3
-result = muvera.encode_fde(embeddings, buckets, "mean")
-print(f"FDE result shape: {result.shape}")
+# Encode multiple documents
+doc_embeddings = np.random.randn(32, 768).astype(np.float32)
+doc_fde = encoder.encode(doc_embeddings, "mean") # (128,) vector
 
-# Encode with max aggregation
-result_max = muvera.encode_fde(embeddings, buckets, "max")
-print(f"FDE max result shape: {result_max.shape}")
+# Encode a query
+query_embeddings = np.random.randn(10, 768).astype(np.float32)
+query_fde = encoder.encode(query_embeddings, "max") # (128,) vector
 ```
-
 ### Rust Example
 
 ```rust
